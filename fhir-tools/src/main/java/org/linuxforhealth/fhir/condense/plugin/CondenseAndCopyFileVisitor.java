@@ -1,5 +1,5 @@
 /*
- * (C) Copyright IBM Corp. 2021
+ * (C) Copyright IBM Corp. 2021, 2026
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.Map;
 
 import jakarta.json.Json;
 import jakarta.json.JsonObject;
@@ -22,12 +23,20 @@ import jakarta.json.JsonReaderFactory;
 import jakarta.json.JsonWriter;
 import jakarta.json.JsonWriterFactory;
 
+import org.eclipse.parsson.api.JsonConfig;
+
 /**
  * A FileVisitor that strips non-meaningful whitespace from JSON files as it copies
  * them to a new directory.
  */
 public class CondenseAndCopyFileVisitor extends SimpleFileVisitor<Path> {
-    final JsonReaderFactory jsonReaderFactory = Json.createReaderFactory(null);
+    // The checked-in FHIR specification bundles include trusted JSON files larger
+    // than Parsson's 15-million-character runtime default. Keep a bounded limit
+    // for this build-only tool without weakening the server parser configuration.
+    static final int MAX_PARSING_LIMIT = 100_000_000;
+
+    final JsonReaderFactory jsonReaderFactory = Json.createReaderFactory(
+            Map.of(JsonConfig.MAX_PARSING_LIMIT, MAX_PARSING_LIMIT));
     final JsonWriterFactory jsonWriterFactory = Json.createWriterFactory(null);
     final Path resourcesDir;
     final Path outputDir;
