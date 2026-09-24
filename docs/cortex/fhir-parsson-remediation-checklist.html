@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LinuxForHealth FHIR Parsson remediation checklist</title>
+  <style>
+    :root { --ink:#17212b; --muted:#5c6773; --line:#d8dee6; --panel:#fff; --blue:#155eef; --green:#067647; --amber:#b54708; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); background:#f4f7fa; font:15px/1.58 system-ui,-apple-system,"Noto Sans Thai",sans-serif; }
+    main { width:min(1080px,calc(100% - 32px)); margin:32px auto; padding:34px; background:var(--panel); border:1px solid var(--line); border-radius:12px; }
+    h1 { margin:0 0 8px; font-size:30px; }
+    h2 { margin-top:38px; padding-bottom:8px; border-bottom:2px solid var(--line); }
+    h3 { margin-top:26px; }
+    a { color:var(--blue); }
+    code { padding:1px 5px; background:#eef2f6; border-radius:4px; }
+    table { width:100%; margin:16px 0; border-collapse:collapse; }
+    th,td { padding:10px 12px; border:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { background:#eef3f9; }
+    .meta { color:var(--muted); }
+    .go { color:var(--green); }
+    .warn { color:var(--amber); }
+    .checklist { list-style:none; padding:0; }
+    .checklist li { position:relative; margin:8px 0; padding-left:28px; }
+    .checklist li::before { content:"☐"; position:absolute; left:0; font-size:18px; }
+    .warning { padding:12px 16px; border-left:4px solid var(--amber); background:#fffaeb; }
+    @media print { body { background:#fff; } main { width:100%; margin:0; border:0; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>LinuxForHealth FHIR Parsson remediation checklist</h1>
+  <p class="meta">Linear: CTXN-8876 · Parent: CTXN-8816 · Updated: 18 Sep 2026</p>
+
+  <h2>1. Security decision</h2>
+  <table>
+    <thead><tr><th>Dependency</th><th>Current</th><th>Target</th><th>Reason</th></tr></thead>
+    <tbody>
+      <tr><td>Server modules</td><td>Parsson <code>jakarta.json</code> 1.1.1</td><td>1.1.9</td><td>แก้ CVE-2023-7272 และรวม default JSON input limit ที่เพิ่มใน 1.1.8 สำหรับ CVE-2026-9563</td></tr>
+      <tr><td>fhir-tools</td><td>Parsson <code>jakarta.json</code> 1.0.0</td><td>1.1.9</td><td>ให้ code generation/build tooling ใช้ implementation เดียวกับ server และไม่เหลือ vulnerable 1.0.x line</td></tr>
+    </tbody>
+  </table>
+  <p>Critical finding เกิดจาก JSON ที่ซ้อนลึกมากทำให้ Java stack overflow และ service ล่มได้. Ingress body-size limit ลด payload ขนาดใหญ่ แต่ไม่ป้องกัน payload ขนาดเล็กที่ซ้อนลึก จึงต้อง patch parser โดยตรง.</p>
+
+  <h2>2. Why LinuxForHealth was selected</h2>
+  <p>หลักฐานใน deployment commit <code>fb2ce61b1c</code> วันที่ 13 Oct 2024 ระบุชัดว่าเพิ่ม LinuxForHealth FHIR R4 เพราะใช้ pure PostgreSQL ที่รองรับ UTF-8 search. HAPI ที่ใช้อยู่ก่อนหน้าเป็น custom HAPI 6.10.x พร้อม Elasticsearch.</p>
+  <div class="warning">จาก source ปัจจุบัน HAPI ไม่ได้ลบอักษรไทยระหว่าง normalize และมี Unicode tests บางภาษา แต่ upstream ไม่มี Thai-specific search regression test. จึงยังสรุปไม่ได้ว่า HAPI แก้ use case ของทีมแล้วโดยไม่ทดสอบกับ PostgreSQL/Elasticsearch configuration จริง.</div>
+
+  <h3>HAPI re-evaluation contract tests</h3>
+  <ul class="checklist">
+    <li>สร้าง Patient ที่มีชื่อไทยทั้งอักษรฐาน สระ วรรณยุกต์ และชื่อที่ normalize เป็น Unicode คนละรูปแบบ.</li>
+    <li>ทดสอบ <code>name</code>, <code>given</code>, <code>family</code> แบบ startsWith, <code>:exact</code> และ <code>:contains</code>.</li>
+    <li>ทดสอบ full-name splitting แบบเดียวกับ <code>new-demographic-api</code>.</li>
+    <li>ทดสอบ sort, pagination และผลลัพธ์เมื่อมีชื่อไทย/อังกฤษปะปน.</li>
+    <li>ทดสอบ read-after-write ทันทีและหลัง Elasticsearch refresh.</li>
+    <li>รัน matrix ทั้ง PostgreSQL-only และ Elasticsearch-enabled; เปรียบเทียบกับ LinuxForHealth production behavior.</li>
+  </ul>
+
+  <h2>3. Fork build and release</h2>
+  <ul class="checklist">
+    <li>Merge dependency PR หลัง Maven tests และ dependency resolution ผ่าน.</li>
+    <li>กำหนด immutable internal image tag; ห้าม deploy <code>latest</code>.</li>
+    <li>ปรับ/ยืนยัน fork release pipeline ให้ publish ไป registry ของ Cortex ไม่ใช่ <code>ghcr.io/linuxforhealth</code>.</li>
+    <li>Build server และ schematool images จาก commit เดียวกัน แล้วสแกน image ด้วย Trivy.</li>
+    <li>สร้าง deployment PR แยกเพื่อเปลี่ยน server/schematool image tags หลัง images publish สำเร็จ.</li>
+  </ul>
+
+  <h2>4. Runtime verification</h2>
+  <ul class="checklist">
+    <li>Smoke test readiness/liveness, OAuth/JWT และ database connectivity.</li>
+    <li>POST/PUT representative FHIR resources และอ่านกลับโดยไม่เปลี่ยนข้อมูลภาษาไทย.</li>
+    <li>รัน Thai-name search matrix ผ่าน <code>new-demographic-api</code>.</li>
+    <li>ส่ง deeply nested JSON ที่ระดับปลอดภัยและยืนยัน parser ปฏิเสธ input โดย process ไม่ล่ม.</li>
+    <li>ส่ง oversized JSON และยืนยัน Parsson input limit/ingress limit ทำงานตามที่ออกแบบ.</li>
+    <li>เฝ้าระวัง 4xx/5xx, CPU, memory, restart และ database query latency หลัง rollout.</li>
+  </ul>
+
+  <h2>5. References</h2>
+  <ul>
+    <li><a href="https://github.com/advisories/GHSA-2rwm-xv5j-777p">CVE-2023-7272 / GHSA-2rwm-xv5j-777p</a></li>
+    <li><a href="https://github.com/eclipse-ee4j/parsson/releases">Eclipse Parsson releases</a></li>
+    <li><a href="https://github.com/eclipse-ee4j/parsson/pull/169">Parsson JSON input-size limit</a></li>
+  </ul>
+</main>
+</body>
+</html>

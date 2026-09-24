@@ -1,0 +1,184 @@
+name: Cortex FHIR 5.1.1 Release CI
+
+on:
+  push:
+    branches:
+      - release/5.1.1-cortex
+  pull_request:
+    branches:
+      - release/5.1.1-cortex
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FHIR_VERSION: 5.1.1
+  CORTEX_RELEASE_VERSION: 5.1.1-cortex.1
+  SERVER_IMAGE: ${{ vars.MAIN_REGISTRY || 'cortexcr.azurecr.io' }}/cortex-x/fhir-server
+  SCHEMATOOL_IMAGE: ${{ vars.MAIN_REGISTRY || 'cortexcr.azurecr.io' }}/cortex-x/fhir-schematool
+
+jobs:
+  build:
+    name: Build and publish Cortex images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Prepare image metadata
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          IMAGE_TAG="${CORTEX_RELEASE_VERSION}-${SHORT_SHA}"
+          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "release-version=$CORTEX_RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "image-tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "build-date=$BUILD_DATE" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "11"
+          cache: maven
+
+      - name: Set Cortex release version
+        env:
+          BUILD_VERSION: ${{ steps.prepare.outputs.release-version }}
+        run: |
+          mvn -B org.codehaus.mojo:versions-maven-plugin:2.7:set-property \
+            --file fhir-parent \
+            -Dproperty=fhir-tools.version \
+            -DnewVersion="$BUILD_VERSION" \
+            -DgenerateBackupPoms=false \
+            --no-transfer-progress
+          mvn -B org.codehaus.mojo:versions-maven-plugin:2.7:set-property \
+            --file fhir-examples \
+            -Dproperty=fhir-tools.version \
+            -DnewVersion="$BUILD_VERSION" \
+            -DgenerateBackupPoms=false \
+            --no-transfer-progress
+          mvn -B org.codehaus.mojo:versions-maven-plugin:2.7:set \
+            --file fhir-tools \
+            -DoldVersion='*' \
+            -DnewVersion="$BUILD_VERSION" \
+            -DgenerateBackupPoms=false \
+            --no-transfer-progress
+          mvn -B org.codehaus.mojo:versions-maven-plugin:2.7:set \
+            --file fhir-examples \
+            -DoldVersion='*' \
+            -DnewVersion="$BUILD_VERSION" \
+            -DgenerateBackupPoms=false \
+            --no-transfer-progress
+          mvn -B org.codehaus.mojo:versions-maven-plugin:2.7:set \
+            --file fhir-parent \
+            -DoldVersion='*' \
+            -DnewVersion="$BUILD_VERSION" \
+            -DgenerateBackupPoms=false \
+            --no-transfer-progress
+
+      - name: Build FHIR artifacts
+        run: |
+          mvn -B install \
+            --file fhir-tools \
+            -DskipTests \
+            --no-transfer-progress \
+            -Dmaven.wagon.http.retryHandler.count=3
+          mvn -B install \
+            --file fhir-examples \
+            -DskipTests \
+            --no-transfer-progress \
+            -Dmaven.wagon.http.retryHandler.count=3
+          mvn -B install \
+            --file fhir-parent \
+            -DskipTests \
+            -Pintegration \
+            --no-transfer-progress \
+            -Dmaven.wagon.http.retryHandler.count=3
+
+      - name: Verify patched Parsson artifacts
+        run: |
+          unzip -l fhir-server-webapp/target/fhir-server.war \
+            | grep 'WEB-INF/lib/jakarta.json-1.1.9.jar' > /dev/null
+          unzip -l fhir-server-webapp/target/fhir-server.war \
+            | grep "WEB-INF/lib/fhir-server-${CORTEX_RELEASE_VERSION}.jar" > /dev/null
+          unzip -l fhir-bulkdata-webapp/target/fhir-bulkdata-webapp.war \
+            | grep 'WEB-INF/lib/jakarta.json-1.1.9.jar' > /dev/null
+
+      - name: Prepare schematool build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fhir-install/src/main/docker/fhir-schematool/target
+          cp fhir-persistence-schema/target/fhir-persistence-schema-*cli.jar \
+            fhir-install/src/main/docker/fhir-schematool/target/
+          cp LICENSE fhir-install/src/main/docker/fhir-schematool/target/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Azure Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/release/5.1.1-cortex'
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ vars.MAIN_REGISTRY || 'cortexcr.azurecr.io' }}
+          username: ${{ vars.MAIN_REGISTRY_USERNAME }}
+          password: ${{ secrets.MAIN_REGISTRY_PASSWORD }}
+
+      - name: Build and push FHIR server
+        id: server
+        uses: docker/build-push-action@v6
+        with:
+          context: fhir-install
+          file: fhir-install/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/release/5.1.1-cortex' }}
+          tags: ${{ env.SERVER_IMAGE }}:${{ steps.prepare.outputs.image-tag }}
+          build-args: |
+            FHIR_SERVER_VERSION=${{ steps.prepare.outputs.image-tag }}
+          labels: |
+            org.opencontainers.image.created=${{ steps.prepare.outputs.build-date }}
+            org.opencontainers.image.revision=${{ steps.prepare.outputs.commit }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.prepare.outputs.image-tag }}
+
+      - name: Build and push FHIR schematool
+        id: schematool
+        uses: docker/build-push-action@v6
+        with:
+          context: fhir-install/src/main/docker/fhir-schematool
+          file: fhir-install/src/main/docker/fhir-schematool/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/release/5.1.1-cortex' }}
+          tags: ${{ env.SCHEMATOOL_IMAGE }}:${{ steps.prepare.outputs.image-tag }}
+          build-args: |
+            FHIR_VERSION=${{ steps.prepare.outputs.image-tag }}
+          labels: |
+            org.opencontainers.image.created=${{ steps.prepare.outputs.build-date }}
+            org.opencontainers.image.revision=${{ steps.prepare.outputs.commit }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.prepare.outputs.image-tag }}
+
+      - name: Summarize images
+        shell: bash
+        run: |
+          {
+            echo "## Cortex FHIR images"
+            echo
+            echo "Source commit: \`${{ steps.prepare.outputs.commit }}\`"
+            echo "Release version: \`${{ steps.prepare.outputs.release-version }}\`"
+            echo "Published: \`${{ github.event_name == 'push' && github.ref == 'refs/heads/release/5.1.1-cortex' }}\`"
+            echo
+            echo "- \`${SERVER_IMAGE}:${{ steps.prepare.outputs.image-tag }}\`"
+            echo "  - digest: \`${{ steps.server.outputs.digest }}\`"
+            echo "- \`${SCHEMATOOL_IMAGE}:${{ steps.prepare.outputs.image-tag }}\`"
+            echo "  - digest: \`${{ steps.schematool.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
